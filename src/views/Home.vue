@@ -1,19 +1,28 @@
 <template>
-  <div class="home">
-    <button @click="startServer">Start server (Listener/Receiver)</button><br>
-    <button @click="startClient">Start client (Sender)</button><br>
-    status: {{status}}<br>
-    data:<br>
-    <textarea v-model="data" cols="100" rows="10"></textarea><br>
-    <button v-if="!isServer" @click="sendDataToServer">Send data to server</button>
+  <div>
+    <form @submit.prevent>
+      <button @click="initiateConnection">Initiate connection</button> OR <button @click="waitForConnection">Wait for connection</button><br>
 
-    <hr>
-    <textarea v-model="descriptionData" cols="100" rows="10" placeholder="Description data, needed to establish a peer to peer connection"></textarea><br>
-    <button @click="isServer ? addClientDescription() : addServerDescription()">Add description</button>
+      <textarea v-model="iceCandidateJson" placeholder="please add each ice candidate separately" style="width: 500px;"></textarea>
+      <button @click="addIceCandidate">add candidate</button><br>
+
+      <textarea v-model="localDescriptionJson" placeholder="local description" style="width: 500px;"></textarea><br>
+
+      <textarea v-model="remoteDescriptionJson" placeholder="remote description" style="width: 500px;"></textarea>
+      <button @click="setRemoteDescription">set</button><br>
+
+      <div v-if="dataChannel.readyState === 'open'">
+        <textarea v-model="messageData" placeholder="Message"></textarea><button @click="sendData(messageData)">Send</button>
+      </div>
+    </form>
   </div>
 </template>
 
 <script>
+  /*
+  Google is kind enough to let people use this for demos, but remember that it is not suitable for public use and if you are building a real app for production use,
+  you should look into setting up your own servers or using a commercial service like Xirsys to provide production ready STUN and TURN signaling for you.
+   */
 const config = {
   'iceServers': [
     {
@@ -32,192 +41,131 @@ const config = {
   ]
 };
 
+const dataChannelOptions = {
+  ordered: false, //no guaranteed delivery, unreliable but faster
+};
+
+
+
 export default {
   name: 'home',
   data() {
     return {
-      server: null,
-      client: null,
-      status: '',
-      data: '',
-      isServer: true,
-      sendChannel: null,
-      receiveChannel: null,
-      descriptionData: ''
+      localDescriptionJson: '',
+      remoteDescriptionJson: '',
+      iceCandidateJson: '',
+
+      rtcPeerConnection: {},
+
+      dataChannel: {},
+
+      messageData: '',
     }
   },
   mounted() {
 
   },
+
   methods: {
-    startServer() {
-      this.isServer = true;
+    // initialize connection from this side
+    initiateConnection() {
+      this.rtcPeerConnection = new RTCPeerConnection(config);
+      //this.rtcPeerConnection.ondatachannel = this.onDataChannel; // we init the connection, we dont need this, right?
+      this.rtcPeerConnection.onicecandidate = this.onIceCandidate;
 
-      // init server
+      // we create the dataChannel because we init the connection.
+      this.dataChannel = this.rtcPeerConnection.createDataChannel('arbitraryLabel', dataChannelOptions);
+      this.dataChannel.onopen = this.dataChannelOnOpen;
 
-      this.server = new RTCPeerConnection(config);
+      // create an offer and set our local description
+      this.rtcPeerConnection.onnegotiationneeded = this.createOffer;
+    },
+    // OR connection from the other side, use onDataChannel() to set this.dataChannel and use addIceCandidate() to add other side's candidates
+    waitForConnection() {
+      this.rtcPeerConnection = new RTCPeerConnection(config);
+      this.rtcPeerConnection.ondatachannel = this.onDataChannel;
+      //this.rtcPeerConnection.onicecandidate = this.onIceCandidate; // other side inits the connection, we dont need this, right?
 
-      this.server.onconnectionstatechange = (e) => {
-        this.status = 'server connectionState: '+this.server.connectionState;
-        console.log('connectionstatechange on server. state: '+this.server.connectionState);
-      };
+      // we dont create a dataChannel because we didn't init the connection. we wait for the ondatachannel event to set it.
 
-      // add ice servers
-      //this.initIce(this.server);
-
-      // add ICE candidates
-      console.log('setting onicecandidate');
-      this.server.onicecandidate = (e) => {
-        if(!e.candidate) {
-          console.log('No candidate');
-          return false;
-        }
-        this.status = 'ICE candidate: '+e.candidate;
-        console.log('ICE candidate: ', e.candidate);
-        this.server.addIceCandidate(e.candidate).then(() => {
-          this.status = "Successfully added ICE candidate.";
-          console.log("Successfully added ICE candidate");
-        }).catch(e => {
-          this.status = 'Error adding ICE candidate.';
-          console.log('Error adding ICE candidate');
-        });
-      };
-
-      // server events
-      this.server.ondatachannel = (e) => {
-        console.log('Server received datachannel!', e);
-        this.status = 'Server received dataChannel!';
-
-        this.receiveChannel = e.channel;
-
-        this.receiveChannel.onopen = (e) => {
-          console.log('Listening on datachannel!', e);
-          this.status = 'Listening on datachannel!'
-        };
-
-        this.receiveChannel.onmessage = e => {
-          console.log('Received message from client!', e);
-          this.status = 'Received message from client!';
-          this.data = e.data;
-        };
-      };
-
-      // create Offer
-      this.server.createOffer().then(description => {
-        console.log('server created an Offer, please send the description to the server', description);
-        this.descriptionData = "Created description, server needs this to allow communication from us: "+JSON.stringify(description);
-
-        this.server.setLocalDescription(description).then(() => {
-          console.log('Server successfully set local description');
-        }).catch(e => {
-          console.log('Error setting server\'s local description', e);
-        });
-      });
-
+      // we wait for an offer to be set in remote description, then we can create an answer.
+      console.log('waiting for remote description... (offer)');
     },
 
-    startClient() {
-      this.isServer = false;
-
-      // init client
-
-      this.client = new RTCPeerConnection(config);
-
-      this.client.onconnectionstatechange = (e) => {
-        this.status = 'client connectionState: '+this.client.connectionState;
-        console.log('connectionstatechange on client. state: '+this.client.connectionState);
-      };
-
-      // create a data channel for sending data
-      this.sendChannel = this.client.createDataChannel('sendDataChannel');
-
-      // add ice servers
-      //this.initIce(this.client);
-
-      // add ICE candidates
-      console.log('setting onicecandidate');
-      this.client.onicecandidate = (e) => {
-        if(!e.candidate) {
-          console.log('No candidate');
-          return false;
-        }
-        this.status = 'ICE candidate: '+e.candidate;
-        console.log('ICE candidate: ', e.candidate);
-        this.client.addIceCandidate(e.candidate).then(() => {
-          this.status = "Successfully added ICE candidate.";
-          console.log("Successfully added ICE candidate");
-        }).catch(e => {
-          this.status = 'Error adding ICE candidate.';
-          console.log('Error adding ICE candidate', e);
-        });
-      };
-
-      // when client is ready to send data
-      this.sendChannel.onopen = () => {
-        this.status =  'client.onopen, readyState: '+this.client.readyState;
-        console.log('client.onopen, readyState: '+this.client.readyState);
-      };
-      this.sendChannel.onclose = () => {
-        this.status =  'client.onclose, readyState: '+this.client.readyState;
-        console.log('client.onclose, readyState: '+this.client.readyState);
-      };
-
-      // start
-
-      // create Offer
-      this.client.createOffer().then(description => {
-        console.log('Client created an Offer, please send the description to the server', description);
-        this.descriptionData = "Created description, server needs this to allow communication from us: "+JSON.stringify(description);
-
-        this.client.setLocalDescription(description).then(() => {
-          console.log('client successfully set local description');
-        }).catch(e => {
-          console.log('Error setting client\'s local description', e);
-        });
+    addIceCandidate() {
+      this.rtcPeerConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(this.iceCandidateJson))).then(() => {
+        console.log('Successfully added ICE candidate.');
+      }).catch((e) => {
+        console.log('Error adding ICE candidate.', e);
       });
     },
-    /*initIce(peer) {
-      // add ICE candidates
-      console.log('setting onicecandidate');
-      peer.onicecandidate = (e) => {
-          this.status = 'ICE candidate: '+e.candidate;
-          console.log('ICE candidate: '+e.candidate);
-          peer.addIceCandidate(e.candidate).then(() => {
-            this.status = "Successfully added ICE candidate.";
-            console.log("Successfully added ICE candidate");
-          }).catch(e => {
-            this.status = 'Error adding ICE candidate.';
-            console.log('Error adding ICE candidate');
-          });
-      };
-    },*/
-    sendDataToServer() {
-      this.sendChannel.send(this.data);
+
+    onIceCandidate(e) {
+      if(!e.candidate) {
+        console.log('No candidate');
+        return false;
+      }
+
+      console.log('ICE candidate, please send to remote:', JSON.stringify(e.candidate));
     },
-    addClientDescription() {
-      console.log(this.descriptionData);
-      this.server.setRemoteDescription(JSON.parse(this.descriptionData)).then(() => {
-        console.log('server set remote description AKA added client description to server');
-      }).catch(e => {
-        console.log('Error setting client description on server', e.message);
-      });
 
-      // creates an answer to the client's Offer (the info is in the description, description contains the SDP)
-      this.server.createAnswer().then(description => {
-        this.descriptionData = "Created description, client needs this to communicate with us: "+JSON.stringify(description);
+    setRemoteDescription() {
+      const sdp = new RTCSessionDescription(JSON.parse(this.remoteDescriptionJson));
+      this.rtcPeerConnection.setRemoteDescription(sdp);
 
-        this.server.setLocalDescription(description).then(() => {
-          console.log('server set local description from our Answer to the client\'s Offer', description);
-        });
+      // if the remote description is an 'offer', we need to create an answer
+      if(this.rtcPeerConnection.remoteDescription.type === 'offer') {
+        this.createAnswer();
+      }
+    },
+
+    setLocalDescription(sdp) {
+      this.rtcPeerConnection.setLocalDescription(sdp);
+
+      this.localDescriptionJson = JSON.stringify(sdp);
+    },
+
+    createOffer() {
+      this.rtcPeerConnection.createOffer().then(sdp => {
+        // after creating our offer, set it as the localDescription. make sure the other peer uses it as remoteDescription (signaling)
+        this.setLocalDescription(sdp);
+        console.log('Offer created, please copy our localDescription and give it to the other peer to use as remoteDescription.');
       });
     },
-    addServerDescription() {
-      console.log(this.descriptionData);
-      this.client.setRemoteDescription(JSON.parse(this.descriptionData)).then(() => {
-        console.log('Client set remote description from server. should be done, but did we see a connectionstatechange or readystatechange?');
-      }).catch(e => {
-        console.log('Error adding server description on client.', e.message);
+
+    createAnswer() {
+      this.rtcPeerConnection.createAnswer().then(sdp => {
+        // after creating the answer, set our localDescription. make sure the other peer uses it as remoteDescription (signaling)
+        this.setLocalDescription(sdp);
+        console.log('Answer created, please copy our localDescription and give it to the other peer to use as remoteDescription.');
       });
+    },
+
+
+
+
+
+    // data channel
+    onDataChannel(e) {
+      this.dataChannel = e.channel;
+      this.dataChannel.onopen = this.dataChannelOnOpen;
+    },
+
+    dataChannelOnOpen() {
+      if(this.dataChannel.readyState === 'open') {
+        console.log('DataChannel open!');
+        this.dataChannel.onmessage = this.dataChannelOnMessage;
+      } else {
+        console.log('DataChannel not open:', this.dataChannel.readyState);
+      }
+    },
+
+    dataChannelOnMessage(e) {
+      console.log(e);
+    },
+
+    sendData(data) {
+      this.dataChannel.send(data);
     }
   }
 }
